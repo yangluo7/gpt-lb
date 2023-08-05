@@ -438,35 +438,59 @@ class ParallelAttention(MegatronModule):
             args.num_attention_heads, world_size)
 
         # Strided linear layer.
-        if attention_type == AttnType.self_attn:
-            self.query_key_value = tensor_parallel.ColumnParallelLinear(
-                args.hidden_size,
-                3 * projection_size,
-                bias=args.add_bias_linear,
-                gather_output=False,
-                init_method=init_method,
-                async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
-                **_args_to_kwargs())
-        else:
-            assert attention_type == AttnType.cross_attn
-            self.query = tensor_parallel.ColumnParallelLinear(
-                args.hidden_size,
-                projection_size,
-                bias=args.add_bias_linear,
-                gather_output=False,
-                init_method=init_method,
-                async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
-                **_args_to_kwargs())
-
-
-            self.key_value = tensor_parallel.ColumnParallelLinear(
-                args.hidden_size,
-                2 * projection_size,
-                bias=args.add_bias_linear,
-                gather_output=False,
-                init_method=init_method,
-                async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
-                **_args_to_kwargs())
+        # if attention_type == AttnType.self_attn:
+            # self.query_key_value = tensor_parallel.ColumnParallelLinear(
+            #     args.hidden_size,
+            #     3 * projection_size,
+            #     bias=args.add_bias_linear,
+            #     gather_output=False,
+            #     init_method=init_method,
+            #     async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+            #     **_args_to_kwargs())
+        self.query = tensor_parallel.ColumnParallelLinear(
+            args.hidden_size,
+            projection_size,
+            bias=args.add_bias_linear,
+            gather_output=False,
+            init_method=init_method,
+            async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+            **_args_to_kwargs())
+        self.key = tensor_parallel.ColumnParallelLinear(
+            args.hidden_size,
+            projection_size,
+            bias=args.add_bias_linear,
+            gather_output=False,
+            init_method=init_method,
+            async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+            **_args_to_kwargs())
+        self.value = tensor_parallel.ColumnParallelLinear(
+            args.hidden_size,
+            projection_size,
+            bias=args.add_bias_linear,
+            gather_output=False,
+            init_method=init_method,
+            async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+            **_args_to_kwargs())
+        # else:
+        #     assert attention_type == AttnType.cross_attn
+        #     self.query = tensor_parallel.ColumnParallelLinear(
+        #         args.hidden_size,
+        #         projection_size,
+        #         bias=args.add_bias_linear,
+        #         gather_output=False,
+        #         init_method=init_method,
+        #         async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+        #         **_args_to_kwargs())
+        #
+        #
+        #     self.key_value = tensor_parallel.ColumnParallelLinear(
+        #         args.hidden_size,
+        #         2 * projection_size,
+        #         bias=args.add_bias_linear,
+        #         gather_output=False,
+        #         init_method=init_method,
+        #         async_tensor_model_parallel_allreduce=args.async_tensor_model_parallel_allreduce,
+        #         **_args_to_kwargs())
 
         self.core_attention = CoreAttention(self.layer_number,
                                             self.attn_mask_type)
@@ -547,41 +571,58 @@ class ParallelAttention(MegatronModule):
         # Query, Key, and Value
         # =====================
 
-        if self.attention_type == AttnType.self_attn:
-            # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
-            mixed_x_layer, _ = self.query_key_value(hidden_states)
+        # if self.attention_type == AttnType.self_attn:
+            # # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
+            # mixed_x_layer, _ = self.query_key_value(hidden_states)
+            #
+            # # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
+            # new_tensor_shape = mixed_x_layer.size()[:-1] + \
+            #     (self.num_attention_heads_per_partition,
+            #      3 * self.hidden_size_per_attention_head)
+            # mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
+            #
+            # # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
+            # (query_layer,
+            #  key_layer,
+            #  value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_x_layer, 3)
 
-            # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
-            new_tensor_shape = mixed_x_layer.size()[:-1] + \
-                (self.num_attention_heads_per_partition,
-                 3 * self.hidden_size_per_attention_head)
-            mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
+        query_layer, _ = self.query(hidden_states)
+        key_layer, _ = self.query(hidden_states)
+        value_layer, _ = self.query(hidden_states)
 
-            # [sq, b, np, 3 * hn] --> 3 [sq, b, np, hn]
-            (query_layer,
-             key_layer,
-             value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_x_layer, 3)
-        else:
-            # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
-            mixed_kv_layer, _ = self.key_value(encoder_output)
-
-            # [sk, b, (np * 2 * hn)] --> [sk, b, np, 2 * hn]
-            new_tensor_shape = mixed_kv_layer.size()[:-1] + \
-                (self.num_attention_heads_per_partition,
-                 2 * self.hidden_size_per_attention_head)
-            mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
-
-            # [sk, b, np, 2 * hn] --> 2 [sk, b, np, hn]
-            (key_layer,
-             value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_kv_layer, 2)
-
-            # Attention head [sq, b, h] --> [sq, b, hp]
-            query_layer, _ = self.query(hidden_states)
-            # [sq, b, hp] --> [sq, b, np, hn]
-            new_tensor_shape = query_layer.size()[:-1] + \
-                (self.num_attention_heads_per_partition,
-                 self.hidden_size_per_attention_head)
-            query_layer = query_layer.view(*new_tensor_shape)
+        new_tensor_shape = query_layer.size()[:-1] + \
+                           (self.num_attention_heads_per_partition,
+                            self.hidden_size_per_attention_head)
+        query_layer = query_layer.view(*new_tensor_shape)
+        new_tensor_shape = key_layer.size()[:-1] + \
+                           (self.num_attention_heads_per_partition,
+                            self.hidden_size_per_attention_head)
+        key_layer = key_layer.view(*new_tensor_shape)
+        new_tensor_shape = value_layer.size()[:-1] + \
+                           (self.num_attention_heads_per_partition,
+                            self.hidden_size_per_attention_head)
+        value_layer = value_layer.view(*new_tensor_shape)
+        # else:
+        #     # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
+        #     mixed_kv_layer, _ = self.key_value(encoder_output)
+        #
+        #     # [sk, b, (np * 2 * hn)] --> [sk, b, np, 2 * hn]
+        #     new_tensor_shape = mixed_kv_layer.size()[:-1] + \
+        #         (self.num_attention_heads_per_partition,
+        #          2 * self.hidden_size_per_attention_head)
+        #     mixed_kv_layer = mixed_kv_layer.view(*new_tensor_shape)
+        #
+        #     # [sk, b, np, 2 * hn] --> 2 [sk, b, np, hn]
+        #     (key_layer,
+        #      value_layer) = tensor_parallel.split_tensor_along_last_dim(mixed_kv_layer, 2)
+        #
+        #     # Attention head [sq, b, h] --> [sq, b, hp]
+        #     query_layer, _ = self.query(hidden_states)
+        #     # [sq, b, hp] --> [sq, b, np, hn]
+        #     new_tensor_shape = query_layer.size()[:-1] + \
+        #         (self.num_attention_heads_per_partition,
+        #          self.hidden_size_per_attention_head)
+        #     query_layer = query_layer.view(*new_tensor_shape)
 
         # ==================================
         # Adjust key and value for inference
